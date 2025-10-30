@@ -1,23 +1,8 @@
-import { useEffect, useState } from "react";
-import { MapContainer, TileLayer, CircleMarker, Popup, Marker, useMap } from "react-leaflet";
+import { useEffect, useState, lazy, Suspense } from "react";
 import Papa from "papaparse";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
-import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-
-// Fix for default marker icons in Leaflet
-import icon from "leaflet/dist/images/marker-icon.png";
-import iconShadow from "leaflet/dist/images/marker-shadow.png";
-
-let DefaultIcon = L.icon({
-  iconUrl: icon,
-  shadowUrl: iconShadow,
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-});
-
-L.Marker.prototype.options.icon = DefaultIcon;
 
 interface GridData {
   Grid_Center_Lon: number;
@@ -32,24 +17,19 @@ interface RiskMapProps {
   onRiskChange: (risk: string) => void;
 }
 
-// Component to handle flying to user location
-const LocationUpdater = ({ center }: { center: [number, number] | null }) => {
-  const map = useMap();
-  
-  useEffect(() => {
-    if (center) {
-      map.flyTo(center, 15, { duration: 2 });
-    }
-  }, [center, map]);
-  
-  return null;
-};
+// Dynamically import the map component to avoid SSR issues
+const RiskMapContent = lazy(() => 
+  import("./RiskMapContent").then(module => ({ default: module.RiskMapContent }))
+);
 
 export const RiskMap = ({ onRiskChange }: RiskMapProps) => {
   const [gridData, setGridData] = useState<GridData[]>([]);
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
+  const [isMounted, setIsMounted] = useState(false);
 
   useEffect(() => {
+    setIsMounted(true);
+    
     // Load CSV data
     fetch("/data/vasai_grid_risk_mapping_1.csv")
       .then((response) => response.text())
@@ -133,19 +113,6 @@ export const RiskMap = ({ onRiskChange }: RiskMapProps) => {
     }
   };
 
-  const getRiskColor = (risk: string): string => {
-    switch (risk) {
-      case "Low":
-        return "#22c55e";
-      case "Moderate":
-        return "#f59e0b";
-      case "High":
-        return "#ef4444";
-      default:
-        return "#6b7280";
-    }
-  };
-
   return (
     <div className="space-y-4">
       <div className="flex justify-between items-center">
@@ -154,60 +121,25 @@ export const RiskMap = ({ onRiskChange }: RiskMapProps) => {
           Get My Location
         </Button>
       </div>
-      <div className="w-full h-[600px] rounded-lg border shadow-glow overflow-hidden">
-        <MapContainer
-          center={[19.365, 72.82]}
-          zoom={13}
-          style={{ height: "100%", width: "100%" }}
-          zoomControl={true}
-        >
-          <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          />
-          
-          {/* Render grid data */}
-          {gridData.map((grid, index) => {
-            if (!grid.Grid_Center_Lon || !grid.Grid_Center_Lat) return null;
-            
-            return (
-              <CircleMarker
-                key={index}
-                center={[grid.Grid_Center_Lat, grid.Grid_Center_Lon]}
-                radius={8}
-                pathOptions={{
-                  fillColor: getRiskColor(grid.Dominant_Risk),
-                  fillOpacity: 0.7,
-                  color: "#ffffff",
-                  weight: 2,
-                }}
-              >
-                <Popup>
-                  <div className="p-2">
-                    <strong className="text-base">Risk Level: {grid.Dominant_Risk}</strong>
-                    <div className="mt-2 space-y-1 text-sm">
-                      <div>Low: {grid.Low_Count?.toFixed(1) || 0}</div>
-                      <div>Moderate: {grid.Moderate_Count?.toFixed(1) || 0}</div>
-                      <div>High: {grid.High_Count?.toFixed(1) || 0}</div>
-                    </div>
-                  </div>
-                </Popup>
-              </CircleMarker>
-            );
-          })}
-          
-          {/* User location marker */}
-          {userLocation && (
-            <Marker position={userLocation}>
-              <Popup>
-                <strong>Your Location</strong>
-              </Popup>
-            </Marker>
-          )}
-          
-          {/* Component to handle location updates */}
-          <LocationUpdater center={userLocation} />
-        </MapContainer>
+      <div className="w-full h-[600px] rounded-lg border shadow-glow overflow-hidden bg-muted/50">
+        {isMounted ? (
+          <Suspense fallback={
+            <div className="w-full h-full flex items-center justify-center">
+              <p className="text-muted-foreground">Loading map...</p>
+            </div>
+          }>
+            <RiskMapContent
+              onRiskChange={onRiskChange}
+              onLocationRequest={requestLocation}
+              userLocation={userLocation}
+              gridData={gridData}
+            />
+          </Suspense>
+        ) : (
+          <div className="w-full h-full flex items-center justify-center">
+            <p className="text-muted-foreground">Initializing map...</p>
+          </div>
+        )}
       </div>
     </div>
   );
