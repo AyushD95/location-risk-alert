@@ -1,8 +1,9 @@
-import { useEffect, useState, lazy, Suspense } from "react";
+import { useEffect, useRef, useState } from "react";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
 import Papa from "papaparse";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
-import "leaflet/dist/leaflet.css";
 
 interface GridData {
   Grid_Center_Lon: number;
@@ -17,20 +18,36 @@ interface RiskMapProps {
   onRiskChange: (risk: string) => void;
 }
 
-// Dynamically import the map component to avoid SSR issues
-const RiskMapContent = lazy(() => 
-  import("./RiskMapContent").then(module => ({ default: module.RiskMapContent }))
-);
-
 export const RiskMap = ({ onRiskChange }: RiskMapProps) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const gridLayerRef = useRef<L.LayerGroup | null>(null);
+  const userMarkerRef = useRef<L.Marker | null>(null);
+
   const [gridData, setGridData] = useState<GridData[]>([]);
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
-  const [isMounted, setIsMounted] = useState(false);
 
+  // Initialize map once
   useEffect(() => {
-    setIsMounted(true);
-    
-    // Load CSV data
+    if (mapRef.current || !containerRef.current) return;
+
+    const map = L.map(containerRef.current).setView([19.365, 72.82], 13);
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      maxZoom: 19,
+    }).addTo(map);
+
+    mapRef.current = map;
+
+    return () => {
+      map.remove();
+      mapRef.current = null;
+    };
+  }, []);
+
+  // Load CSV data once
+  useEffect(() => {
     fetch("/data/vasai_grid_risk_mapping_1.csv")
       .then((response) => response.text())
       .then((csvText) => {
@@ -48,6 +65,59 @@ export const RiskMap = ({ onRiskChange }: RiskMapProps) => {
       });
   }, []);
 
+  // Render grid markers when data or map changes
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    // Clear previous layer
+    if (gridLayerRef.current) {
+      gridLayerRef.current.clearLayers();
+      map.removeLayer(gridLayerRef.current);
+    }
+
+    const group = L.layerGroup();
+
+    const getRiskColor = (risk: string): string => {
+      switch (risk) {
+        case "Low":
+          return "#22c55e"; // hsl(var(--risk-low))
+        case "Moderate":
+          return "#f59e0b"; // hsl(var(--risk-moderate))
+        case "High":
+          return "#ef4444"; // hsl(var(--risk-high))
+        default:
+          return "#6b7280";
+      }
+    };
+
+    gridData.forEach((grid) => {
+      if (!grid.Grid_Center_Lon || !grid.Grid_Center_Lat) return;
+
+      const marker = L.circleMarker([grid.Grid_Center_Lat, grid.Grid_Center_Lon], {
+        radius: 8,
+        color: "#ffffff",
+        weight: 2,
+        fillColor: getRiskColor(grid.Dominant_Risk),
+        fillOpacity: 0.7,
+      });
+
+      marker.bindPopup(
+        `<div style="padding:6px">
+          <strong>Risk Level: ${grid.Dominant_Risk}</strong><br/>
+          Low: ${grid.Low_Count?.toFixed(1) || 0}<br/>
+          Moderate: ${grid.Moderate_Count?.toFixed(1) || 0}<br/>
+          High: ${grid.High_Count?.toFixed(1) || 0}
+        </div>`
+      );
+
+      marker.addTo(group);
+    });
+
+    group.addTo(map);
+    gridLayerRef.current = group;
+  }, [gridData]);
+
   const requestLocation = () => {
     if (!navigator.geolocation) {
       toast.error("Geolocation is not supported by your browser");
@@ -60,8 +130,20 @@ export const RiskMap = ({ onRiskChange }: RiskMapProps) => {
       (position) => {
         const { latitude, longitude } = position.coords;
         setUserLocation([latitude, longitude]);
+
+        const map = mapRef.current;
+        if (map) {
+          map.flyTo([latitude, longitude], 15, { duration: 1.5 });
+
+          if (userMarkerRef.current) {
+            userMarkerRef.current.setLatLng([latitude, longitude]);
+          } else {
+            userMarkerRef.current = L.marker([latitude, longitude]).addTo(map);
+          }
+        }
+
         checkRiskLevel(longitude, latitude);
-        
+
         toast.dismiss();
         toast.success("Location acquired!");
       },
@@ -73,14 +155,12 @@ export const RiskMap = ({ onRiskChange }: RiskMapProps) => {
   };
 
   const checkRiskLevel = (lon: number, lat: number) => {
-    // Find nearest grid
     let nearestGrid: GridData | null = null;
     let minDistance = Infinity;
 
     gridData.forEach((grid) => {
       const distance = Math.sqrt(
-        Math.pow(grid.Grid_Center_Lon - lon, 2) +
-          Math.pow(grid.Grid_Center_Lat - lat, 2)
+        Math.pow(grid.Grid_Center_Lon - lon, 2) + Math.pow(grid.Grid_Center_Lat - lat, 2)
       );
 
       if (distance < minDistance) {
@@ -94,14 +174,11 @@ export const RiskMap = ({ onRiskChange }: RiskMapProps) => {
 
       const riskMessages = {
         Low: "You are in a Low risk zone. Stay alert for updates.",
-        Moderate:
-          "⚠️ You are in a Moderate risk zone. Monitor conditions closely.",
+        Moderate: "⚠️ You are in a Moderate risk zone. Monitor conditions closely.",
         High: "🚨 You are in a High risk zone! Take precautions immediately.",
-      };
+      } as const;
 
-      const message =
-        riskMessages[nearestGrid.Dominant_Risk as keyof typeof riskMessages] ||
-        "Unknown risk level";
+      const message = (riskMessages as any)[nearestGrid.Dominant_Risk] || "Unknown risk level";
 
       if (nearestGrid.Dominant_Risk === "High") {
         toast.error(message, { duration: 10000 });
@@ -121,26 +198,7 @@ export const RiskMap = ({ onRiskChange }: RiskMapProps) => {
           Get My Location
         </Button>
       </div>
-      <div className="w-full h-[600px] rounded-lg border shadow-glow overflow-hidden bg-muted/50">
-        {isMounted ? (
-          <Suspense fallback={
-            <div className="w-full h-full flex items-center justify-center">
-              <p className="text-muted-foreground">Loading map...</p>
-            </div>
-          }>
-            <RiskMapContent
-              onRiskChange={onRiskChange}
-              onLocationRequest={requestLocation}
-              userLocation={userLocation}
-              gridData={gridData}
-            />
-          </Suspense>
-        ) : (
-          <div className="w-full h-full flex items-center justify-center">
-            <p className="text-muted-foreground">Initializing map...</p>
-          </div>
-        )}
-      </div>
+      <div ref={containerRef} className="w-full h-[600px] rounded-lg border shadow-glow overflow-hidden" />
     </div>
   );
 };
